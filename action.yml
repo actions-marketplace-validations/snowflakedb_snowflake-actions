@@ -1,4 +1,4 @@
-﻿# action.yml
+# action.yml
 name: "Snowflake Actions"
 description: "Snowflake CI/CD actions for GitHub. Plan, deploy, and test Snowflake projects from your workflows."
 branding:
@@ -44,7 +44,7 @@ runs:
         echo "SF_GITHUB_ACTION=true" >> "$GITHUB_ENV"
         echo "SF_CICD_INTEGRATION_VERSION=$SF_CICD_INTEGRATION_VERSION" >> "$GITHUB_ENV"
 
-    - uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 #v7.1.6
+    - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 #v8.2.0
       with:
         python-version: "3.11"
 
