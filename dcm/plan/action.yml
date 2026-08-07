@@ -25,7 +25,7 @@
 #         id-token: write
 #         contents: read
 #       steps:
-#         - uses: actions/checkout@v4
+#         - uses: actions/checkout@v7
 #         - uses: snowflakedb/snowflake-actions/dcm/plan@v3
 #           with:
 #             target: DCM_STAGE
@@ -142,10 +142,10 @@ runs:
 
         if [ "$PLAN_EXIT" -eq 0 ]; then
           echo "result=success" >> "$GITHUB_OUTPUT"
-          dcm_emit_plan_summary success "DCM Plan to ${TARGET} successful" "$PLAN_OUTPUT_FILE"
+          dcm_emit_changeset_summary success "DCM Plan to ${TARGET} successful" "$PLAN_OUTPUT_FILE" open
         else
           echo "result=failure" >> "$GITHUB_OUTPUT"
-          dcm_emit_plan_summary failure "DCM Plan to ${TARGET} failed" "$PLAN_OUTPUT_FILE"
+          dcm_emit_changeset_summary failure "DCM Plan to ${TARGET} failed" "$PLAN_OUTPUT_FILE" open
         fi
 
         if [ "$PLAN_DELTA" = "true" ]; then
@@ -157,7 +157,7 @@ runs:
           exit 1
         fi
 
-        echo "plan-file=${PROJECT_PATH%/}/out/plan/plan_result.json" >> "$GITHUB_OUTPUT"
+        echo "plan-file=${PROJECT_PATH%/}/out/plan_result.json" >> "$GITHUB_OUTPUT"
 
     - name: Write result artifact
       if: always()
@@ -175,7 +175,7 @@ runs:
       with:
         name: dcm-plan-${{ inputs.target }}-${{ env.DCM_PROJECT_SLUG }}
         path: |
-          ${{ env.PROJECT_PATH }}/out/plan/plan_result.json
+          ${{ env.PROJECT_PATH }}/out/plan_result.json
           /tmp/dcm-results/dcm-plan-${{ inputs.target }}.txt
 
     - name: Comment on PR
