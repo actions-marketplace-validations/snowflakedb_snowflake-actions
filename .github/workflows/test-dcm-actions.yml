@@ -18,14 +18,14 @@ permissions:
 
 jobs:
   unit-test-summary-structure:
-    name: Unit test summary structure
+    name: Unit test summary structure and alias
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - name: "Test: the changeset section, colour coding and dropped repaints"
+      - name: "Test: changeset section, colour coding, repaints and deployment alias"
         shell: bash
         run: |
           set -e
@@ -201,6 +201,42 @@ jobs:
           assert_contains "$COMMENT_FILE" 'No output captured. Check the Actions log for details.' 'empty output keeps its placeholder'
           assert_balanced "$COMMENT_FILE" 'nothing'
           echo 'PASS: empty output keeps its placeholder'
+
+          # The deployment alias must be unique per run, so a re-run does not collide with its
+          # earlier attempt, and must still name where the change came from.
+          alias_of() {
+            (
+              export GITHUB_RUN_ID="${2:-31184885387}"
+              export GITHUB_RUN_ATTEMPT="${3:-1}"
+              export GITHUB_REF_NAME="${4:-main}"
+              # shellcheck source=/dev/null
+              . "$WORKSPACE/scripts/dcm-lib.sh"
+              dcm_deployment_alias "$1"
+            )
+          }
+
+          assert_alias() {
+            local got="$1" want="$2" why="$3"
+            [ "$got" = "$want" ] || { echo "FAIL: $why"; echo "  want: $want"; echo "  got:  $got"; exit 1; }
+          }
+
+          assert_alias "$(alias_of 'feature/my-change')" 'feature_my_change-31184885387.1' \
+            'the PR branch is sanitised and carries the run id and attempt'
+          assert_alias "$(alias_of 'feature/my-change' 31184885387 2)" 'feature_my_change-31184885387.2' \
+            'a re-run of the same commit gets a different alias'
+          assert_alias "$(alias_of '' 31184885387 1 'main')" 'main-31184885387.1' \
+            'with no PR branch the ref name is used, so a push deploy is still labelled'
+          assert_alias "$(alias_of '' 31184885387 1 'release/3.4')" 'release_3_4-31184885387.1' \
+            'a slashed ref name is sanitised too'
+          assert_alias "$(alias_of 'dependabot/github_actions/actions/checkout-7.0.1')" \
+            'dependabot_github_actions_actions_checko-31184885387.1' \
+            'a long branch is truncated so it cannot dominate the alias'
+
+          # Two runs of the same commit must never produce the same alias.
+          first="$(alias_of 'feature/x' 100 1)"
+          second="$(alias_of 'feature/x' 200 1)"
+          [ "$first" != "$second" ] || { echo "FAIL: two runs produced the same alias"; exit 1; }
+          echo 'PASS: the deployment alias is unique per run and names its source'
           SH
           bash "$HARNESS"
 
@@ -228,7 +264,8 @@ jobs:
           const os = require('os');
           const path = require('path');
 
-          const { postSummaryComment } = require(`${process.env.GITHUB_WORKSPACE}/scripts/pr-comment.js`);
+          const { postSummaryComment, resolvePrNumber, resolvePrBranch } =
+            require(`${process.env.GITHUB_WORKSPACE}/scripts/pr-comment.js`);
 
           const LIMIT = 65536;
           const FENCE = '```';
@@ -291,6 +328,17 @@ jobs:
           }
 
           const prContext = { eventName: 'pull_request', issue: { number: 7 }, repo: { owner: 'o', repo: 'r' }, runId: 42 };
+
+          // What GitHub provides for a pull_request_target run: the payload names the PR,
+          // while context.sha is the tip of the default branch rather than the PR head.
+          const prTargetContext = {
+            eventName: 'pull_request_target',
+            issue: { number: 7 },
+            payload: { pull_request: { number: 7, head: { ref: 'feature/my-change' } } },
+            repo: { owner: 'o', repo: 'r' },
+            runId: 42,
+            sha: 'defaultbranchhead',
+          };
           const only = (github) => [...github.store.values()][0];
           const bodies = (github) => [...github.store.values()].map(c => c.body);
 
@@ -391,6 +439,41 @@ jobs:
               assert.equal(updated.length, 1, 'only the matching comment is rewritten');
               assert.ok(updated[0].includes('<!-- dcm-plan:PROD:proj-a -->'), 'the rewritten comment is the matching one');
               console.log('PASS: comments for other targets, projects and actions are left alone');
+            }
+
+            // pull_request_target must resolve the PR from the payload. Its context.sha is a
+            // commit on the default branch, so a commit lookup would return the PR that was
+            // merged last and the comment would land on a closed, unrelated PR.
+            {
+              let lookups = 0;
+              const github = stubGithub();
+              github.rest.repos.listPullRequestsAssociatedWithCommit = async () => {
+                lookups++;
+                return { data: [{ number: 999, head: { ref: 'previously/merged' } }] };
+              };
+
+              assert.equal(await resolvePrNumber(github, prTargetContext), 7,
+                'the PR number comes from the payload, not from the last merged PR');
+              assert.equal(await resolvePrBranch(github, prTargetContext), 'feature/my-change',
+                'the deploy alias comes from the PR head branch, not from the last merged PR');
+              assert.equal(lookups, 0, 'no commit lookup is attempted for pull_request_target');
+
+              await postSummaryComment(github, prTargetContext, summaryFile('prt.md', planSummary(2)), 'fallback', 'dcm-plan:PREPROD:proj');
+              assert.equal(github.calls.created, 1, 'the comment is posted');
+              assert.ok(only(github).body.includes('<!-- dcm-plan:PREPROD:proj -->'), 'the comment carries its marker');
+              console.log('PASS: pull_request_target resolves the PR from the payload');
+            }
+
+            // Events that carry no PR payload still fall back to the commit lookup.
+            {
+              const github = stubGithub();
+              github.rest.repos.listPullRequestsAssociatedWithCommit = async () => ({
+                data: [{ number: 123, head: { ref: 'topic/from-commit' } }],
+              });
+              const pushContext = { eventName: 'push', repo: { owner: 'o', repo: 'r' }, runId: 42, sha: 'abc123' };
+              assert.equal(await resolvePrNumber(github, pushContext), 123, 'push still resolves via the commit');
+              assert.equal(await resolvePrBranch(github, pushContext), 'topic/from-commit', 'push still resolves the branch via the commit');
+              console.log('PASS: push events still use the commit lookup');
             }
 
             // Without an associated PR there is nothing to comment on.
