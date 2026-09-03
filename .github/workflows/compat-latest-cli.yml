@@ -9,6 +9,7 @@ name: Compatibility — latest Snowflake CLI
 # cross-repo release webhook. Daily cadence comfortably meets 48 h.
 
 on:
+  pull_request:
   schedule:
     # 06:17 UTC — slightly off the hour to avoid GitHub-Actions cron spikes.
     - cron: '17 6 * * *'
@@ -39,6 +40,37 @@ jobs:
       - name: Install Snowflake CLI via this action (latest release)
         uses: ./
         # cli-version omitted → action installs the latest release from PyPI.
+
+      - name: Assert the action did not leak UV_PYTHON
+        shell: bash
+        run: |
+          set -e
+          # The action pins Python per `uv tool install`, so it must not export
+          # UV_PYTHON into the job env (which would break consumers' later `uv`
+          # steps that require a different interpreter).
+          if [ -n "${UV_PYTHON:-}" ]; then
+            echo "::error::UV_PYTHON leaked into the job env: '$UV_PYTHON'"
+            exit 1
+          fi
+
+      - name: Smoke-test installed CLI
+        shell: bash
+        run: |
+          set -e
+          snow --version
+          snow --help > /dev/null
+          snow connection list > /dev/null
+
+  install-cli-leaf:
+    name: Install Snowflake CLI via the snowflake-cli leaf action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Snowflake CLI via the leaf action
+        uses: ./snowflake-cli
 
       - name: Smoke-test installed CLI
         shell: bash

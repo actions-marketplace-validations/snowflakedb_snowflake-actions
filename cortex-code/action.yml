@@ -1,0 +1,111 @@
+# cortex-code/action.yml
+name: "Cortex Code CLI"
+description: "Install and configure the Cortex Code CLI (cortex) for CI/CD workflows."
+branding:
+  icon: "cpu"
+  color: "blue"
+
+inputs:
+  cli-channel:
+    description: "Install channel: stable or beta. The exec subcommand is available on stable from v1.1.41."
+    required: false
+    default: "stable"
+
+  cli-version:
+    description: "CoCo CLI version to install (e.g. 1.5.2). Use 'latest' for the newest in the channel. Version pinning requires the version to be available."
+    required: false
+    default: "latest"
+
+  connection-name:
+    description: "Connection name to write in connections.toml when configuring from OIDC env vars"
+    required: false
+    default: "default"
+
+  use-oidc:
+    description: "Mint a GitHub OIDC token and write a workload-identity connection. Requires 'id-token: write'. Leave false if a parent step already set the OIDC token env var."
+    required: false
+    default: "false"
+
+  oidc-token-name:
+    description: "Env var name containing the OIDC token. Must match the token env var set by use-oidc (or by a parent action, if it set one)."
+    required: false
+    default: "SNOWFLAKE_TOKEN"
+
+  prompt:
+    description: "Optional inline Cortex Code prompt string to run after setup. Mutually exclusive with prompt-file. Leave both empty to install and configure only."
+    required: false
+    default: ""
+
+  prompt-file:
+    description: "Optional path to a file containing the Cortex Code prompt to run after setup. Mutually exclusive with prompt."
+    required: false
+    default: ""
+
+  prompt-args:
+    description: "Extra arguments appended to `cortex exec` when running `prompt`/`prompt-file` (e.g. '--max-turns 4 --output-format stream-json'). Space-separated; quoted arguments containing spaces are not supported."
+    required: false
+    default: ""
+
+outputs:
+  cortex-version:
+    description: "Installed Cortex Code CLI version"
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        CHANNEL: ${{ inputs.cli-channel }}
+        VERSION: ${{ inputs.cli-version }}
+      run: bash $GITHUB_ACTION_PATH/../scripts/validate-cortex-inputs.sh
+
+    - name: Set up action environment
+      shell: bash
+      run: bash $GITHUB_ACTION_PATH/../scripts/setup-environment.sh SF_CORTEX_CODE_GITHUB_ACTION
+
+    - name: Install Cortex Code CLI
+      shell: bash
+      env:
+        CORTEX_CHANNEL: ${{ inputs.cli-channel }}
+      run: bash $GITHUB_ACTION_PATH/scripts/install-cortex.sh
+
+    - name: Pin specific version
+      if: ${{ inputs.cli-version != 'latest' }}
+      shell: bash
+      env:
+        CORTEX_VERSION: ${{ inputs.cli-version }}
+      run: bash $GITHUB_ACTION_PATH/scripts/pin-cortex-version.sh
+
+    # Mint the OIDC token without the Snowflake CLI, so this action stands alone.
+    # If a parent step already exported the token, this is a no-op (see the
+    # script's idempotency check).
+    - name: Set up workload identity authentication
+      if: ${{ inputs.use-oidc == 'true' }}
+      shell: bash
+      env:
+        OIDC_TOKEN_NAME: ${{ inputs.oidc-token-name }}
+      run: bash $GITHUB_ACTION_PATH/../scripts/oidc-token.sh
+
+    - name: Configure connection
+      shell: bash
+      env:
+        CONNECTION_NAME: ${{ inputs.connection-name }}
+        OIDC_TOKEN_NAME: ${{ inputs.oidc-token-name }}
+      run: python3 $GITHUB_ACTION_PATH/scripts/setup-connection.py
+
+    - name: Output version
+      id: version
+      shell: bash
+      run: bash $GITHUB_ACTION_PATH/scripts/output-cortex-version.sh
+
+    - name: Run prompt
+      if: ${{ inputs.prompt != '' || inputs.prompt-file != '' }}
+      shell: bash
+      env:
+        CORTEX_PROMPT: ${{ inputs.prompt }}
+        CORTEX_PROMPT_FILE: ${{ inputs.prompt-file }}
+        CONNECTION_NAME: ${{ inputs.connection-name }}
+        CORTEX_PROMPT_ARGS: ${{ inputs.prompt-args }}
+      run: bash $GITHUB_ACTION_PATH/scripts/run-prompt.sh

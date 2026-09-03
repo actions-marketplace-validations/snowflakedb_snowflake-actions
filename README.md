@@ -1,25 +1,43 @@
 # Snowflake Actions
 
-GitHub Action that installs and configures the [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/index) in a workflow, so you can deploy dbt, [DCM](https://docs.snowflake.com/en/developer-guide/snowflake-cli/dcm/overview), [Snowflake App Runtime](https://docs.snowflake.com/en/developer-guide/snowflake-app-runtime/about-snowflake-app-runtime), and Streamlit projects, run SQL, and automate any Snowflake CLI task from CI/CD.
+GitHub Action that installs and configures the [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/index) in a workflow, so you can deploy dbt, Streamlit, and DCM projects, ship Snowflake App Runtime apps, run SQL, and automate any Snowflake CLI task from CI/CD.
 
 ## How it works
 
-The action:
+The action installs the Snowflake CLI in your workflow and can configure authentication, so later steps can run `snow` commands against Snowflake.
 
-1. Installs Python 3.11 and the `uv` package manager.
-2. Installs the Snowflake CLI in an isolated environment.
-3. Copies your `config.toml` into `~/.snowflake/` if present (skipped with a notice if the file doesn't exist).
-4. With `use-oidc: true`, fetches a GitHub OIDC token and sets the workload-identity environment variables.
+1. Installs `uv`.
+2. Installs the Snowflake CLI with `uv tool install --python 3.11` into an isolated tool environment. The `snow` command is available in later steps.
+3. Copies your `config.toml` to `~/.snowflake/` if present (skipped if the file doesn't exist).
+4. With `use-oidc: true`, reads a GitHub OIDC token and sets the workload-identity environment variables the CLI expects.
 
-## Quick start
+## Example workflow
+
+Install the Snowflake CLI and run commands against Snowflake from GitHub Actions:
 
 ```yaml
-steps:
-  - uses: snowflakedb/snowflake-actions@v2
-  - run: snow --version
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+
+      - env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+        run: snow connection test -x
+      # snow dbt deploy, snow streamlit deploy, snow dcm deploy, snow sql -f migration.sql, etc.
 ```
 
-Connecting to Snowflake also needs auth. See [Authentication](#authentication); **use OIDC.**
+> [!IMPORTANT]
+> This example uses [OIDC](#oidc-recommended). Configure a Snowflake service user with a matching workload identity before you run it.
 
 ## Inputs
 
@@ -77,7 +95,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: snowflakedb/snowflake-actions@v2
+      - uses: snowflakedb/snowflake-actions@v3
         with:
           use-oidc: true
       - env:
@@ -85,35 +103,34 @@ jobs:
         run: snow connection test -x
 ```
 
-### Key pair or password (fallback)
+### Credential-based auth (fallback)
 
-Use this only when OIDC isn't available. Store credentials in [GitHub Secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions) (first [generate a key pair](https://docs.snowflake.com/en/user-guide/key-pair-auth)) and pass them as `SNOWFLAKE_*` environment variables:
+Use this only when [OIDC](#oidc-recommended) isn't available. You can either:
+
+- Pass credentials as [environment variables](https://docs.snowflake.com/en/developer-guide/snowflake-cli/connecting/configure-connections#use-environment-variables-for-snowflake-credentials) and use `-x` so the CLI reads them without a `config.toml`.
+- Define a connection in [`config.toml`](https://docs.snowflake.com/en/developer-guide/snowflake-cli/connecting/configure-connections#define-connections).
 
 ```yaml
-steps:
-  - uses: snowflakedb/snowflake-actions@v2
-  - env:
-      SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
-      SNOWFLAKE_ACCOUNT: ${{ secrets.ACCOUNT }}
-      SNOWFLAKE_USER: ${{ secrets.USER }}
-      SNOWFLAKE_PRIVATE_KEY_RAW: ${{ secrets.PRIVATE_KEY }}
-    run: snow connection test -x
+# Option 1: env vars + temporary connection
+- uses: snowflakedb/snowflake-actions@v3
+- env:
+    SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+    # ...other SNOWFLAKE_* vars — see docs above
+  run: snow connection test -x
+
+# Option 2: config.toml
+- uses: snowflakedb/snowflake-actions@v3
+  with:
+    default-config-file-path: ./config.toml
+- run: snow connection test
 ```
-
-> Set warehouse, database, role, etc. the same way: `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_SCHEMA`.
->
-> If your private key is encrypted, also set `PRIVATE_KEY_PASSPHRASE: ${{ secrets.PASSPHRASE }}`.
->
-> To use a password instead (not recommended), drop `SNOWFLAKE_AUTHENTICATOR` and set `SNOWFLAKE_PASSWORD`.
-
-See [Configure Snowflake CLI connections](https://docs.snowflake.com/en/developer-guide/snowflake-cli/connecting/configure-connections) for all options.
 
 ## Version pinning
 
 ```yaml
 - uses: snowflakedb/snowflake-actions@<sha>   # commit SHA (most secure)
-- uses: snowflakedb/snowflake-actions@v2.0.4  # exact patch
-- uses: snowflakedb/snowflake-actions@v2      # floating major
+- uses: snowflakedb/snowflake-actions@v3.0.0  # exact patch
+- uses: snowflakedb/snowflake-actions@v3      # floating major
 ```
 
 ## Install from a branch, tag, or commit
@@ -121,7 +138,7 @@ See [Configure Snowflake CLI connections](https://docs.snowflake.com/en/develope
 Install the CLI from source (for example, to test an unreleased fix). `v2+`.
 
 ```yaml
-- uses: snowflakedb/snowflake-actions@v2
+- uses: snowflakedb/snowflake-actions@v3
   with:
     custom-github-ref: "feature/my-branch"   # branch, tag, or commit
 ```
@@ -136,6 +153,138 @@ Runs on Linux, macOS, and Windows GitHub-hosted runners.
 - **Least-privilege permissions:** OIDC needs `id-token: write`; most jobs need only `contents: read`.
 - **Set `persist-credentials: false`** on `actions/checkout`.
 - **Never commit credentials.** Inject them via GitHub Secrets at runtime.
+
+## Cortex Code CLI action
+
+A companion action that installs and configures the [Cortex Code CLI](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code-cli) (`cortex`) for CI/CD workflows. Requires `snowflakedb/snowflake-actions@v3` to run first (provides `snow` CLI and OIDC auth).
+
+```yaml
+- uses: snowflakedb/snowflake-actions@v3
+  with:
+    use-oidc: true
+
+- uses: snowflakedb/snowflake-actions/cortex-code@v3
+```
+
+### How it works
+
+1. Verifies `snow` CLI is on PATH (fails fast if parent action wasn't used).
+2. Installs CoCo CLI from the specified channel.
+3. Pins a specific version if `cli-version` is set.
+4. Auto-detects `SNOWFLAKE_TOKEN` in the environment (set by parent action's OIDC flow) and writes `connections.toml` so `cortex -c <name>` works. If a connection with that name already exists, it skips (no overwrite).
+
+### Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `cli-channel` | `stable` | Install channel: `stable` or `beta`. |
+| `cli-version` | `latest` | Version to install (e.g. `1.5.2`). Requires the version to be available in the channel. |
+| `connection-name` | `default` | Connection name written to `connections.toml`. |
+| `oidc-token-name` | `SNOWFLAKE_TOKEN` | Env var name containing the OIDC token. Must match parent action's `oidc-token-name` if overridden. |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `cortex-version` | Installed CoCo CLI version string. |
+
+### Example: CoCo agent workflow
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+
+      - uses: snowflakedb/snowflake-actions/cortex-code@v3
+        with:
+          cli-channel: beta
+
+      - run: cortex exec --file .cortex/prompts/scan.md -c default --bypass --no-history
+```
+
+### Platform support
+
+Runs on Linux (ubuntu) GitHub-hosted runners. Requires Python 3.11+ on PATH (satisfied by all GitHub-hosted runners).
+
+### Self-hosted runners
+
+On self-hosted runners that persist between jobs, add a cleanup step to remove credentials:
+
+```yaml
+- name: Clean up credentials
+  if: always()
+  run: rm -f ~/.snowflake/connections.toml
+```
+
+---
+
+## GitHub actions for DCM Projects
+
+> **Public Preview** — Features and interfaces may change before general availability.
+
+Four composite actions for automating [Snowflake DCM Projects](https://docs.snowflake.com/en/user-guide/dcm-projects/dcm-projects-overview) CI/CD pipelines. Each action handles one step of the lifecycle; compose them to build end-to-end workflows.
+
+| Action                                                     | Description                                                                                                                                                                      |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[dcm/parse-manifest](dcm/README.md#dcm-parse-manifest)`   | Parse `manifest.yml` and output target names as a JSON array for matrix strategies                                                                                               |
+| `[dcm/connection-test](dcm/README.md#dcm-connection-test)` | Test Snowflake connectivity, validate that the connection role matches the manifest `project_owner`, and check whether the project already exists                                |
+| `[dcm/plan](dcm/README.md#dcm-plan)`                       | Run `snow dcm plan`, write a color-coded changeset summary (🟩 CREATE 🟨 ALTER 🟥 DROP) to the Step Summary and optionally post it as a PR comment, and upload the plan artifact |
+| `[dcm/deploy](dcm/README.md#dcm-deploy)`                   | Run `snow dcm plan` then `snow dcm deploy` with optional drop detection and post-deploy SQL scripts; optionally post a deploy summary as a PR comment                            |
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: DCM_STAGE
+    env:
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: snowflakedb/snowflake-actions/dcm/connection-test@v3
+        with:
+          target: DCM_STAGE
+          project-path: my-dcm-project/
+          snowflake-user: ${{ env.SNOWFLAKE_USER }}
+
+      - uses: snowflakedb/snowflake-actions/dcm/plan@v3
+        with:
+          target: DCM_STAGE
+          project-path: my-dcm-project/
+          snowflake-user: ${{ env.SNOWFLAKE_USER }}
+          comment-on-pr: "true"
+
+      - uses: snowflakedb/snowflake-actions/dcm/deploy@v3
+        with:
+          target: DCM_STAGE
+          project-path: my-dcm-project/
+          snowflake-user: ${{ env.SNOWFLAKE_USER }}
+          comment-on-pr: "true"
+```
+
+See the [DCM actions README](dcm/README.md) for full input/output references, authentication setup, and a complete multi-environment pipeline example.
+
+---
 
 ## Support
 
