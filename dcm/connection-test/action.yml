@@ -48,6 +48,25 @@ inputs:
   snowflake-user:
     description: "Snowflake username for OIDC authentication"
     required: true
+  cli-artifact:
+    description: >-
+      Path to a local Snowflake CLI wheel, sdist, or directory of wheels.
+      Forwarded to the Snowflake CLI setup step and installed offline. uv and
+      python3 must already be on PATH. Air-gapped runners can instead
+      preinstall snow on PATH and leave this empty. Either offline path exports
+      SNOWFLAKE_CLI_AIR_GAPPED=true for later steps unless that variable is
+      already set.
+    required: false
+    default: ""
+  oidc-audience:
+    description: >-
+      Audience (aud) claim requested for the GitHub OIDC token. Forwarded to
+      the Snowflake CLI setup step. An omitted value is empty. Empty uses
+      SNOWFLAKE_AUDIENCE when that is already set. Otherwise the action requests
+      snowflakecomputing.com, unless SNOWFLAKE_CLI_AIR_GAPPED is true, in which
+      case oidc-audience or SNOWFLAKE_AUDIENCE must be set.
+    required: false
+    default: ""
 
 outputs:
   result:
@@ -70,6 +89,8 @@ runs:
       uses: snowflakedb/snowflake-actions@v3
       with:
         use-oidc: true
+        oidc-audience: ${{ inputs.oidc-audience }}
+        cli-artifact: ${{ inputs.cli-artifact }}
 
     - name: Read manifest target
       id: read_manifest
@@ -180,9 +201,10 @@ runs:
           CONN_ROLE="❌ failed"
           FAILED=true
         else
-          # Account validation
-          CONN_ACCT_UPPER=$(echo "$CONN_ACCOUNT" | tr '[:lower:]' '[:upper:]')
-          MANIFEST_ACCT_UPPER=$(echo "$MANIFEST_ACCOUNT" | tr '[:lower:]' '[:upper:]')
+          # The connector removes region/cloud suffixes from the account value.
+          # Normalize only for comparison; keep the full identifier for connecting.
+          CONN_ACCT_UPPER=$(printf '%s' "${CONN_ACCOUNT%%.*}" | tr '[:lower:]' '[:upper:]')
+          MANIFEST_ACCT_UPPER=$(printf '%s' "${MANIFEST_ACCOUNT%%.*}" | tr '[:lower:]' '[:upper:]')
           if [ "$CONN_ACCT_UPPER" = "$MANIFEST_ACCT_UPPER" ]; then
             ACCT_STATUS="✅"
           else
@@ -293,7 +315,7 @@ runs:
 
     - name: Upload result artifact
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: dcm-connection-${{ inputs.target }}-${{ env.DCM_PROJECT_SLUG }}
         path: /tmp/dcm-results/dcm-connection-${{ inputs.target }}.txt

@@ -6,8 +6,8 @@ GitHub Action that installs and configures the [Snowflake CLI](https://docs.snow
 
 The action installs the Snowflake CLI in your workflow and can configure authentication, so later steps can run `snow` commands against Snowflake.
 
-1. Installs `uv`.
-2. Installs the Snowflake CLI with `uv tool install --python 3.11` into an isolated tool environment. The `snow` command is available in later steps.
+1. Installs `uv`, unless `snow` is already on `PATH` or `cli-artifact` points at a local wheel (those paths do not download `uv`).
+2. Installs the Snowflake CLI with `uv tool install --python 3.11` into an isolated tool environment. The `snow` command is available in later steps. A preinstalled `snow` is reused when `cli-version` is left empty.
 3. Copies your `config.toml` to `~/.snowflake/` if present (skipped if the file doesn't exist).
 4. With `use-oidc: true`, reads a GitHub OIDC token and sets the workload-identity environment variables the CLI expects.
 
@@ -43,16 +43,33 @@ jobs:
 
 | Input | Default | Description |
 |-------|---------|-------------|
-| `cli-version` | latest | CLI version to install (e.g. `3.20.0`). |
+| `cli-version` | (omitted) | CLI version to install (e.g. `3.20.0`). An omitted value is empty. Empty reuses a `snow` already on `PATH` and does not download. That reuse exports `SNOWFLAKE_CLI_AIR_GAPPED=true` for later steps, unless the variable is already set or an earlier step installed the CLI from the network. If `snow` is not on `PATH`, empty installs the latest release from PyPI. The string `latest` always installs from PyPI. |
 | `use-oidc` | `false` | Authenticate with a GitHub OIDC token. |
 | `oidc-token-name` | `SNOWFLAKE_TOKEN` | Env var the OIDC token is exported as. |
+| `oidc-audience` | (omitted) | `aud` claim for the OIDC token. An omitted value is empty. Empty uses `SNOWFLAKE_AUDIENCE` when that is already set. Otherwise the action requests `snowflakecomputing.com`, unless `SNOWFLAKE_CLI_AIR_GAPPED` is true, in which case `oidc-audience` or `SNOWFLAKE_AUDIENCE` must be set. |
 | `default-config-file-path` | `./config.toml` | Path to your `config.toml`. |
 | `custom-github-ref` | none | Install the CLI from a branch, tag, or commit. |
+| `cli-artifact` | none | Local wheel, sdist, or directory of wheels. Installed offline, and exports `SNOWFLAKE_CLI_AIR_GAPPED=true` for later steps unless that variable is already set. |
+| `cortex-binary` | none | Local Cortex Code executable. Skips the release-archive download. The download is also skipped when `cortex` is already on `PATH`. A pinned `cortex-version` fails in both cases. |
 
-- `cli-version` and `custom-github-ref` are mutually exclusive.
+- `cli-version`, `custom-github-ref`, and `cli-artifact` are mutually exclusive.
 - `use-oidc` needs CLI `3.11+` and `id-token: write`.
 - `custom-github-ref` installs from [`snowflake-cli`](https://github.com/snowflakedb/snowflake-cli) instead of PyPI, and requires action `v2+`.
 - `default-config-file-path` is skipped if the file is absent.
+
+## Air-gapped runners and AWS ISO
+
+GitHub-hosted runners are unchanged: the action downloads `uv` and installs the CLI from PyPI.
+
+On a runner with no route to `pypi.org`, `github.com`, or `sfc-repo.snowflakecomputing.com`:
+
+- Preinstall `snow` on `PATH` and leave `cli-version`, `custom-github-ref`, and `cli-artifact` empty. The action reuses that binary and does not download `uv`. It exports `SNOWFLAKE_CLI_AIR_GAPPED=true` for later steps.
+- Or set `cli-artifact` to a wheel, sdist, or a directory of wheels. `uv` and `python3` must already be on the runner. The install is `uv tool install --offline` and does not contact PyPI. Put dependency wheels next to the CLI wheel (or in that directory) so `--find-links` can resolve them. This path exports `SNOWFLAKE_CLI_AIR_GAPPED=true` as well.
+- For Cortex Code, set `cortex-binary` to a local `cortex` executable, or preinstall `cortex` on `PATH` and leave `cortex-version` at `latest`. The action does not download a release archive. A `cortex-version` other than `latest` fails in both of those cases, because pinning reaches the network. `cortex-binary` cannot be combined with a pinned `cortex-version`. Setting root `cli-version` to `latest` still installs the Snowflake CLI from PyPI.
+
+Either offline path exports `SNOWFLAKE_CLI_AIR_GAPPED=true` into the job environment, so later `snow` commands run air-gapped without a separate flag: no auto-upgrade, no public template download, and no commercial OIDC audience default. An explicit `SNOWFLAKE_CLI_AIR_GAPPED` is left unchanged, so set it to `false` to reuse a preinstalled binary without that mode. A CLI this job already installed from PyPI or GitHub is not flipped when a later step only reuses it.
+
+An omitted `oidc-audience` stays empty. Empty uses `SNOWFLAKE_AUDIENCE` when the job already set it, and otherwise requests `snowflakecomputing.com`. With `SNOWFLAKE_CLI_AIR_GAPPED=true` — set by you, or exported by an offline setup above — that commercial default is refused: the step fails until `oidc-audience` or `SNOWFLAKE_AUDIENCE` is set to the audience on the Snowflake OIDC security integration. These packages have no governance-zone signal, so the audience is not rewritten automatically.
 
 ## Authentication
 
@@ -127,11 +144,24 @@ Use this only when [OIDC](#oidc-recommended) isn't available. You can either:
 
 ## Version pinning
 
+`@v3` tracks the latest 3.x.x release. Each release moves that tag, so `snowflakedb/snowflake-actions@v3` runs the new release with no workflow edit. The same tag covers this action, `cortex-code`, and the DCM actions.
+
 ```yaml
 - uses: snowflakedb/snowflake-actions@<sha>   # commit SHA (most secure)
 - uses: snowflakedb/snowflake-actions@v3.0.0  # exact patch
-- uses: snowflakedb/snowflake-actions@v3      # floating major
+- uses: snowflakedb/snowflake-actions@v3      # latest 3.x.x
 ```
+
+### Workflow dependency lockfiles
+
+[Workflow dependency lockfiles](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles) are a GitHub Actions public preview. A workflow that is not locked behaves as it does today: inputs and OIDC are unchanged, and `uses: snowflakedb/snowflake-actions@v3` still tracks new 3.x.x releases. You opt in by creating `.github/workflows/actions.lock` with [`gh actions-lock`](https://github.com/github/gh-actions-lock). If an admin requires a lockfile, a workflow without one fails until you create it.
+
+Creating the lockfile stops `@v3` from tracking. The command rewrites `@v3` to the release it resolved, for example `@v3.3.2`, and records that commit. Later runs use the recorded commit, including actions this action calls, even after `@v3` moves. A newer 3.x.x release is used only when the lockfile is updated. If Dependabot manages GitHub Actions in your repository, it opens one pull request that bumps the version and updates the lockfile. Otherwise, change the `uses:` line and run `gh actions-lock` again.
+
+The lockfile pins this action. It does not pin the Snowflake CLI installed from PyPI. An empty `cli-version`, or `latest`, still installs the current CLI on each run.
+
+> [!NOTE]
+> An allowlist entry for `snowflakedb/snowflake-actions@v3` does not match a locked workflow. GitHub checks the locked commit, not the tag. A tag entry cannot match that commit: the tag can move, and its history includes every earlier 3.x release. Allow `snowflakedb/snowflake-actions@*` or the full commit SHA. `@*` allows every ref in this repository, including a future major. An allowlist cannot say "only 3.x commits."
 
 ## Install from a branch, tag, or commit
 
@@ -149,7 +179,7 @@ Runs on Linux, macOS, and Windows GitHub-hosted runners.
 
 ## Security
 
-- **Prefer OIDC** over long-lived secrets, and pin the action to a commit SHA.
+- **Prefer OIDC** over long-lived secrets, and pin the action to a commit SHA or a [workflow lockfile](#workflow-dependency-lockfiles).
 - **Least-privilege permissions:** OIDC needs `id-token: write`; most jobs need only `contents: read`.
 - **Set `persist-credentials: false`** on `actions/checkout`.
 - **Never commit credentials.** Inject them via GitHub Secrets at runtime.
@@ -169,8 +199,8 @@ A companion action that installs and configures the [Cortex Code CLI](https://do
 ### How it works
 
 1. Verifies `snow` CLI is on PATH (fails fast if parent action wasn't used).
-2. Installs CoCo CLI from the specified channel.
-3. Pins a specific version if `cli-version` is set.
+2. Installs the channel's Cortex Code release archive and checks it against the release manifest, unless `cortex-binary` is set or `cortex` is already on `PATH`.
+3. Pins a specific version when `cli-version` is not `latest` and Cortex was just downloaded. A published archive is installed from that archive. Otherwise the installed CLI updates to that version. Fails before either step when `cortex-binary` is set or `cortex` was already on `PATH`.
 4. Auto-detects `SNOWFLAKE_TOKEN` in the environment (set by parent action's OIDC flow) and writes `connections.toml` so `cortex -c <name>` works. If a connection with that name already exists, it skips (no overwrite).
 
 ### Inputs
@@ -178,9 +208,11 @@ A companion action that installs and configures the [Cortex Code CLI](https://do
 | Input | Default | Description |
 |-------|---------|-------------|
 | `cli-channel` | `stable` | Install channel: `stable` or `beta`. |
-| `cli-version` | `latest` | Version to install (e.g. `1.5.2`). Requires the version to be available in the channel. |
+| `cli-version` | `latest` | Version to install (e.g. `1.5.2`). Requires the version to be available in the channel. A value other than `latest` installs that version's release archive when one is published, and otherwise runs `cortex update`. It fails when `cortex-binary` is set or `cortex` is already on `PATH`. |
+| `cortex-binary` | none | Local Cortex Code executable. Skips the release-archive download. The download is also skipped when `cortex` is already on `PATH`. Cannot be combined with a pinned `cli-version`. |
 | `connection-name` | `default` | Connection name written to `connections.toml`. |
 | `oidc-token-name` | `SNOWFLAKE_TOKEN` | Env var name containing the OIDC token. Must match parent action's `oidc-token-name` if overridden. |
+| `oidc-audience` | (omitted) | `aud` claim when this action mints the OIDC token. An omitted value is empty. Empty uses `SNOWFLAKE_AUDIENCE` when that is already set, otherwise `snowflakecomputing.com`, unless `SNOWFLAKE_CLI_AIR_GAPPED` is true. |
 
 ### Outputs
 
